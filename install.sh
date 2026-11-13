@@ -87,7 +87,9 @@ setup_python() {
   # Creates server/hub.key the first time. Later runs leave the existing key alone.
   (cd "$DIR/server" && "$DIR/server/.venv/bin/python" -c "import hub; hub.key()")
   chmod 600 "$DIR/server/hub.key"
-  chmod +x "$DIR/server/phonectl" "$DIR/server/hub.py" "$DIR/app/build.sh"
+  # phonectl is invoked as a command; hub.py is started with python, so leave its mode alone
+  # (chmod on a tracked file makes the next update look dirty).
+  chmod +x "$DIR/server/phonectl" "$DIR/app/build.sh"
   log "Hub key is at $DIR/server/hub.key (keep it private; it was not printed)"
 }
 
