@@ -69,9 +69,9 @@ flowchart LR
 
 - 🔵 A **glowing blue border** and an "AI agent is using your phone" notification whenever an agent acts.
 - ⏹️ **Stop** in that notification blocks every agent for 30 minutes (**Resume** to undo). It keeps working while an approval card is up.
-- ✅ Reading the screen, scrolling, and opening apps just happen. Paying, sending, deleting, installing, or a password field shows a **card** on the phone: slide to approve once or for this session. A tap does not approve. Deny, or ignore it, and the timer refuses.
-- 🧾 If you ask to order something **cash on delivery** and you name the app, that order can finish on its own, including the place-order button, once checkout really shows cash / pay on delivery. Anything else (card, UPI, a wallet such as Amazon Pay) still needs the card. See below.
-- 🔒 Password and PIN fields do nothing until you slide to approve.
+- ✅ Reading the screen, scrolling, and opening apps just happen. Paying, sending, deleting, or installing shows a **card** on the phone: slide to approve once or for this session. A tap does not approve. Deny, or ignore it, and the timer refuses.
+- 🧾 If you ask to order something **cash on delivery** and you name the app, that order can finish on its own, including the place-order button, once checkout really shows cash / pay on delivery and the cart is what you asked for. Anything else (card, UPI, a wallet such as Amazon Pay, or extra items) still needs the card. See below.
+- 🔒 Password and PIN fields are never typed into. A slide does not unlock them.
 - 🧑‍🤝‍🧑 Two agents never fight over the phone: a shared lock lets one drive at a time.
 
 ## Tools
@@ -135,12 +135,13 @@ The rule applies only when the owner's own request **names the app** and **cash 
 `phone task`. It then:
 
 1. Finishes the order, including the final place-order button, with no extra card.
-2. Checks the checkout screen first. The selected method must be cash or pay on delivery.
-3. If a card, UPI, or wallet (including Amazon Pay) is selected, switches to cash on delivery instead of paying.
-4. If cash on delivery is not offered, falls back to the approval card.
+2. Checks the checkout screen first. The selected method must be cash or pay on delivery. An option marked unchecked does not count.
+3. Checks the items on screen against the request. Anything else in the cart falls back to the approval card.
+4. If a card, UPI, or wallet (including Amazon Pay) is selected, switches to cash on delivery instead of paying.
+5. If cash on delivery is not offered, falls back to the approval card.
 
 Payment and banking apps always use the card. Every auto-completed order is logged with the
-app, items, total, and time (`phone log`). Any other purchase uses the card.
+app, the items actually on screen, the total, and the time (`phone log`). Any other purchase uses the card.
 
 ## You need
 

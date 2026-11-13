@@ -20,10 +20,11 @@
   phone policy [on|off]        cash-on-delivery auto-complete (on by default)
   phone revoke                 clear "approve for this session"
 
-Reading, scrolling, and opening apps just run. Paying, sending, deleting, installing, and
-password fields show a card on the phone: slide to approve, or it denies itself when the
-timer ends. If the owner's request named the app and cash on delivery, the final place-order
-button completes with no card once the screen shows that payment method. If they tap Stop, stop.
+Reading, scrolling, and opening apps just run. Paying, sending, deleting, and installing
+show a card on the phone: slide to approve, or it denies itself when the timer ends.
+Password and PIN fields are refused. If the owner's request named the app and cash on delivery,
+the final place-order tap completes the order only when that method is selected and the cart
+matches the request. Otherwise the approval card is shown. If they tap Stop, stop.
 """
 import json, os, socket, sys, time
 

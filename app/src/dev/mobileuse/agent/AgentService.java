@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * Mobile Use: lets the owner's AI agent (on their server, over Tailscale) see and drive
  * this phone. Shows a glowing blue border and a notification with a Stop button while active.
  * Risky actions wait on an approval card (slide to approve, or deny when the timer ends).
+ * Password and PIN fields are refused and the approval flag does not unlock them.
  */
 public class AgentService extends AccessibilityService {
     static AgentService instance;
@@ -100,8 +101,8 @@ public class AgentService extends AccessibilityService {
             case "click": return click(a.getInt("i"), a.optBoolean("approved", false));
             case "long_click": {
                 AccessibilityNodeInfo held = node(a.getInt("i"));
-                if (held.isPassword() && !a.optBoolean("approved", false))
-                    throw new Exception("password field: approve it on the phone first");
+                if (held.isPassword())
+                    throw new Exception("password field: never touched by the agent");
                 return gesture(center(a.getInt("i")), center(a.getInt("i")), 800);
             }
             case "tap": return gesture(new int[]{a.getInt("x"), a.getInt("y")}, new int[]{a.getInt("x"), a.getInt("y")}, 60);
@@ -255,7 +256,7 @@ public class AgentService extends AccessibilityService {
 
     JSONObject click(int i, boolean approved) throws Exception {
         AccessibilityNodeInfo n = node(i);
-        if (n.isPassword() && !approved) throw new Exception("password field: approve it on the phone first");
+        if (n.isPassword()) throw new Exception("password field: never touched by the agent");
         if (n.isClickable() && n.performAction(AccessibilityNodeInfo.ACTION_CLICK))
             return new JSONObject().put("done", "click");
         int[] c = center(i);
@@ -282,7 +283,7 @@ public class AgentService extends AccessibilityService {
     JSONObject setText(int i, String text, boolean clear, boolean enter, boolean approved) throws Exception {
         AccessibilityNodeInfo n = i >= 0 ? node(i) : findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
         if (n == null) throw new Exception("no text field focused; give the field number");
-        if (n.isPassword() && !approved) throw new Exception("password field: approve it on the phone first");
+        if (n.isPassword()) throw new Exception("password field: never typed into by the agent");
         n.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
         if (n.isClickable()) n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
         String now = n.getText() == null || n.isShowingHintText() ? "" : n.getText().toString();

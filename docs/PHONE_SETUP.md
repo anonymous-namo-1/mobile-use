@@ -33,8 +33,9 @@
   It disappears 15 s after the agent's last action.
 - **Stop:** blocks every agent for 30 minutes (or until **Resume** is tapped).
 - **Approval card** at the bottom (same blue as the glow): the agent wants to pay, send, delete,
-  install, or type into a password field. Slide the thumb across to approve once or for this
-  session. A tap does not approve. Deny, or let the timer run out, and nothing happens.
+  or install. Slide the thumb across to approve once or for this session. A tap does not
+  approve. Deny, or let the timer run out, and nothing happens. Password and PIN fields are
+  never filled in.
   Stop in the notification still works while the card is up.
 
 ## Banking apps

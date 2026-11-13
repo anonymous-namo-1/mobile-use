@@ -116,9 +116,10 @@ def main():
         rc, out = phone("click", "2")
         check("Send needs a slide-to-approve (denied here)", rc != 0 and "did not allow" in out, out)
         check("Send is a message risk", asks()[-1].get("risk") == "message", str(asks()[-1:]))
+        asked = len(asks())
         rc, out = phone("type", "4", "secret")
-        check("password field needs the card and was denied", rc != 0 and "password" in out.lower(), out)
-        check("password ask names the risk", asks()[-1].get("risk") == "password", str(asks()[-1:]))
+        check("password field is refused with no card",
+              rc != 0 and "password" in out.lower() and len(asks()) == asked, out)
         rc, out = phone("open", "calculator")
         check("open app by name", rc == 0 and ("open_app", {"package": "com.example.calculator"}) in calls, out)
 

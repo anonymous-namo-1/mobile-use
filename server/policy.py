@@ -11,10 +11,13 @@ of these are true:
   - the owner's own request named the shopping app and cash / pay on delivery (or COD)
   - the app in front is that app, and it is not a payment/banking app
   - the checkout screen really shows cash / pay on delivery as the payment method
+  - an option marked unchecked is not treated as selected
+  - every product line on screen matches the items in that request
 
 A card, UPI, or wallet (including Amazon Pay) is never auto-completed. If cash on
 delivery is on the screen but not selected, the tap is refused with instructions to
-switch. If it is not offered, the normal approval card is shown.
+switch. If it is not offered, or the cart has anything else in it, the normal approval
+card is shown. Password and PIN fields are never typed into.
 """
 import json
 import os
@@ -331,8 +334,21 @@ def request_covers(req, app):
     return False
 
 
+def _explicit_off(element):
+    """True when the tree says this control is off, not merely silent about it."""
+    if "checked" in element and not element.get("checked"):
+        return True
+    if "selected" in element and element.get("selected") is False:
+        return True
+    return False
+
+
 def _chosen(element, label):
-    return bool(element.get("checked") or element.get("selected") or CHOSEN_RE.search(label or ""))
+    if _explicit_off(element):
+        return False
+    if element.get("checked") or element.get("selected"):
+        return True
+    return CHOSEN_RE.search(label or "") is not None
 
 
 def _offer_only(label):
@@ -357,9 +373,11 @@ def payment_state(elements):
         chosen = _chosen(e, label)
         if is_cod_label(label):
             cod_any = True
-            cod_chosen = cod_chosen or chosen
-            if chosen or not _offer_only(label):
-                cod_bare = True
+            # checked:false is not "the method in force", even when no prepaid row is present.
+            if not _explicit_off(e):
+                cod_chosen = cod_chosen or chosen
+                if chosen or not _offer_only(label):
+                    cod_bare = True
         elif PREPAID_RE.search(label):
             pre_any = True
             pre_chosen = pre_chosen or chosen
@@ -396,7 +414,7 @@ def purchase_gate(cfg, req, app, label, elements, element=None):
         only_finish = kind == "button" and not any(
             is_final(e.get("label") or "") or is_explicit_pay(e.get("label") or "") for e in others)
         if only_finish and payment_state(elements) in ("cod_selected", "unknown"):
-            return "auto"
+            return _finish(req, elements)
         return "navigate"
     if is_navigation(label) and not is_final(label) and not is_explicit_pay(label):
         return "navigate"
@@ -408,7 +426,7 @@ def purchase_gate(cfg, req, app, label, elements, element=None):
     if is_buy_now(label) and not is_final(label) and not is_explicit_pay(label) and state == "unknown":
         return "navigate"
     if state == "cod_selected":
-        return "auto"
+        return _finish(req, elements)
     if state == "cod_unselected":
         return "switch"
     return "card"
@@ -434,6 +452,70 @@ def switch_message(elements):
         "Switch the payment method to Cash on delivery or Pay on delivery, then place the order again. "
         "Do not pay with a card, UPI, or wallet."
     )
+
+
+_CHROME_RE = re.compile(
+    r"\b(total|to pay|delivery fee|handling fee|handling charge|platform fee|gst|"
+    r"tax|taxes|tip|coupon|bill details|item total|grand total|packaging|surge|"
+    r"donation|cutlery|delivery in|minutes|address|deliver to|order summary|"
+    r"savings|discount|view details|quantity|you pay|amount payable|free delivery|"
+    r"delivery charge|saved address)\b", re.I)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+_ITEM_STOP = {
+    "a", "an", "the", "of", "and", "with", "some", "pack", "pcs", "pc", "kg", "ml",
+    "ltr", "for", "from", "via", "using", "cash", "delivery", "pay", "cod",
+}
+
+
+def cart_lines(elements):
+    """Product-like labels on the checkout screen, not payment rows or bill chrome."""
+    lines = []
+    for e in elements or []:
+        label = (e.get("label") or "").strip()
+        if not (3 <= len(label) <= 80) or not re.search(r"[A-Za-z]", label):
+            continue
+        if (is_cod_label(label) or is_final(label) or is_explicit_pay(label)
+                or is_navigation(label) or is_buy_now(label) or PREPAID_RE.search(label)
+                or _CHROME_RE.search(label)):
+            continue
+        if e.get("kind") == "button" and re.match(
+                r"^(add|remove|delete|change|edit|apply|view|see|hide|ok|cancel|done|close|back)\b",
+                label, re.I):
+            continue
+        if label not in lines:
+            lines.append(label)
+    return lines[:8]
+
+
+def _item_tokens(text):
+    return [w for w in _WORD_RE.findall((text or "").lower()) if len(w) >= 3 and w not in _ITEM_STOP]
+
+
+def cart_problem(req, elements):
+    """None when every visible product line is part of the owner's request.
+
+    Otherwise a sentence for the approval card. A cart we cannot see, or one that
+    contains something else, is not auto-completed.
+    """
+    requested = extract_items((req or {}).get("text") or "")
+    tokens = _item_tokens(requested)
+    lines = cart_lines(elements)
+    if not tokens:
+        return "The request does not name the items, so this order needs your approval."
+    if not lines:
+        return "The cart items are not on this screen, so this order needs your approval."
+    extras = [line for line in lines if not any(tok in line.lower() for tok in tokens)]
+    if extras:
+        shown = ", ".join(extras[:3])
+        return f"The cart has items that were not requested ({shown}). Approve only if that cart is right."
+    return None
+
+
+def _finish(req, elements):
+    """Place the order only when the visible cart is exactly the requested items."""
+    if cart_problem(req, elements):
+        return "card"
+    return "auto"
 
 
 def extract_items(text):
@@ -468,11 +550,12 @@ def _app_label(req, package):
 
 
 def order_fields(req, app, elements, label):
-    items = extract_items(req.get("text") or "")
+    seen = cart_lines(elements)
     return {
         "app": _app_label(req, app),
         "package": app,
-        "items": items or "not shown",
+        "items": "; ".join(seen) if seen else "not shown",
+        "requested": extract_items(req.get("text") or "") or "not shown",
         "total": screen_total(elements) or "not shown",
         "button": label,
         "request": req.get("text") or "",
@@ -509,8 +592,10 @@ def explain_request(rec):
         return (
             f"Cash-on-delivery auto-complete is armed for {names} for {minutes} minutes. "
             "Finish that order, including the final place-order button, only while the screen shows "
-            "cash or pay on delivery. If a card, UPI, or wallet is selected, switch to cash on delivery. "
-            "If cash on delivery is not offered, placing the order shows the approval card. "
+            "cash or pay on delivery, and the items on screen are the ones in the request. "
+            "If a card, UPI, or wallet is selected, switch to cash on delivery. "
+            "If cash on delivery is not offered, it is unchecked, or the cart has other items, "
+            "placing the order shows the approval card. "
             "Call set_owner_request again for the next thing the owner asks."
         )
     if rec.get("cod") and not rec.get("packages"):
@@ -547,7 +632,11 @@ def explain_checkout(app, elements, store=None):
         f"place_order_would: {would}",
     ]
     if state == "cod_selected":
-        lines.append("guidance: cash on delivery is the payment method. The final place-order button can complete the order if this app was named in the owner's request.")
+        problem = cart_problem(req, elements) if req.get("armed") else None
+        if problem:
+            lines.append("guidance: " + problem + " Do not place the order without the approval card.")
+        else:
+            lines.append("guidance: cash on delivery is the payment method, and the items on screen match the request. The final place-order button can complete the order.")
     elif state == "cod_unselected":
         lines.append("guidance: select Cash on delivery or Pay on delivery. Do not pay with a card, UPI, or wallet.")
     elif state == "cod_unavailable":
@@ -584,12 +673,15 @@ def authorize(hub, *, kind, element=None, elements=None, why="", confirm=False, 
               agent="", typed="", seen_app=""):
     """Decide whether an action may run. Returns {approved, auto_cod}.
 
-    approved is true only after the owner used the card (once or for the session);
-    password fields on the phone accept text only then. auto_cod means the
+    approved is true only after the owner used the card (once or for the session).
+    Password and PIN fields are refused before any card. auto_cod means the
     cash-on-delivery rule placed an order and wrote the audit log.
     """
     store = get_store()
     cfg = load_policy()
+    if element and element.get("password"):
+        raise ApprovalDenied(
+            "password field: never type a password or PIN, even after an approval on the phone")
     ping = hub("ping") or {}
     if ping.get("stopped"):
         store.clear_session()
@@ -600,12 +692,13 @@ def authorize(hub, *, kind, element=None, elements=None, why="", confirm=False, 
     if element is not None and seen_app and app and seen_app != app:
         raise ApprovalDenied("the app in front changed since the last look(); call look() again")
 
-    if element and element.get("password"):
-        gate = None
-        risk = "password"
-    else:
-        gate = purchase_gate(cfg, store.request(), app, label, elements, element)
-        risk = "payment" if gate == "card" else classify(kind, element, app, enter=enter)
+    req = store.request()
+    gate = purchase_gate(cfg, req, app, label, elements, element)
+    risk = "payment" if gate == "card" else classify(kind, element, app, enter=enter)
+    if gate == "card" and payment_state(elements) == "cod_selected":
+        problem = cart_problem(req, elements)
+        if problem:
+            why = (problem + " " + why).strip() if why else problem
 
     if gate == "auto":
         fields = order_fields(store.request(), app, elements, label)
@@ -620,7 +713,7 @@ def authorize(hub, *, kind, element=None, elements=None, why="", confirm=False, 
 
     if risk is None:
         return {"approved": False, "auto_cod": False}
-    if confirm and risk != "password" and gate != "card":
+    if confirm and gate != "card":
         title, what, why_line = describe(risk, kind, element, why, typed)
         store.audit("approval", agent=agent, decision="chat_confirm", risk=risk, app=app,
                     action=what, why=why_line)
@@ -644,10 +737,6 @@ def authorize(hub, *, kind, element=None, elements=None, why="", confirm=False, 
         return {"approved": True, "auto_cod": False}
     if answer == "allow_once":
         return {"approved": True, "auto_cod": False}
-    if risk == "password":
-        raise ApprovalDenied(
-            f"the owner did not allow typing into a password field ({answer}). "
-            "Never type a password or PIN unless they slide to approve on the phone.")
     raise ApprovalDenied(
         f"the owner did not allow it on the phone ({answer}). "
         "Ask them in chat, then repeat with confirm=true, or wait if they tapped Stop.")

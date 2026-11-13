@@ -62,8 +62,10 @@ only run `phone …` (see `server/restricted-ssh.md`), never a full shell.
 | `approval_log()`, `set_policy(on)`, `revoke_approvals()` | Audit log, the COD rule, session grants. |
 | `status`, `wake` | Connection and lock state; turn the screen on. |
 
-Safety built in: reading, scrolling, and opening apps just run. Paying, sending, deleting,
-installing, and password fields show the approval card (slide; a tap does not approve).
-`confirm=true` records that the person already agreed in chat, except for password fields, which
-always need the card. Cash-on-delivery orders the person asked for, in an app they named, can
-complete without the card only when checkout shows that payment method. See the README.
+Safety built in: reading, scrolling, and opening apps just run. Paying, sending, deleting, and
+installing show the approval card (slide; a tap does not approve). Password and PIN fields are
+refused outright. `confirm=true` records that the person already agreed in chat; it does not
+unlock a password field, and it does not skip the card when cash on delivery could not be
+verified. Cash-on-delivery orders the person asked for, in an app they named, can complete
+without the card only when checkout shows that payment method and the items on screen are the
+ones they named. See the README.

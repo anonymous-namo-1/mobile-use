@@ -55,7 +55,8 @@ def main():
     check("payment apps are not armable", policy.match_apps("pay on PhonePe, COD", apps) == [])
     check("the word cash is not an app", policy.match_apps("order milk, cash on delivery", apps) == [])
 
-    cod = [el("Cash on Delivery", kind="text", checked=True), el("To pay ₹199", kind="text"), el("Place order")]
+    cod = [el("Milk 1L", kind="text"), el("Cash on Delivery", kind="text", checked=True),
+           el("To pay ₹199", kind="text"), el("Place order")]
     check("checked COD is selected", policy.payment_state(cod) == "cod_selected")
     check("only a COD line counts as selected",
           policy.payment_state([el("Payment method Cash on Delivery", kind="text")]) == "cod_selected")
@@ -64,6 +65,9 @@ def main():
     check("UPI alone means COD is unavailable", policy.payment_state([el("UPI", checked=True)]) == "cod_unavailable")
     check("an available badge is not a selection",
           policy.payment_state([el("Cash on delivery available", kind="text")]) == "unknown")
+    unchecked = [el("Milk 1L", kind="text"), el("Cash on Delivery", kind="text", checked=False), el("Place order")]
+    check("an explicitly unchecked COD option is not selected",
+          policy.payment_state(unchecked) == "unknown")
     check("Amazon Pay is prepaid", policy.payment_state([el("Amazon Pay balance", checked=True)]) == "cod_unavailable")
 
     req = armed()
@@ -74,6 +78,11 @@ def main():
           policy.purchase_gate(CFG, req, pkg, "Buy now", [el("Milk"), el("Cash on delivery available", kind="text")]) == "navigate")
     check("place order with COD selected is auto",
           policy.purchase_gate(CFG, req, pkg, "Place order", cod, el("Place order")) == "auto")
+    check("an unchecked COD option does not auto-complete",
+          policy.purchase_gate(CFG, req, pkg, "Place order", unchecked, el("Place order")) == "card")
+    extra = cod + [el("Bread 400g", kind="text")]
+    check("an extra cart item is not auto-completed",
+          policy.purchase_gate(CFG, req, pkg, "Place order", extra, el("Place order")) == "card")
     check("place order on UPI asks to switch",
           policy.purchase_gate(CFG, req, pkg, "Place order", both, el("Place order")) == "switch")
     check("place order with no COD shows the card",
@@ -112,8 +121,8 @@ def main():
     rows = store.read_audit()
     order = rows[-1]
     check("the order log has app, items, total, and time",
-          order["event"] == "cod_order" and order["app"] == "Blinkit" and order["items"] == "milk"
-          and order["total"] == "₹199" and order["ts"], str(order))
+          order["event"] == "cod_order" and order["app"] == "Blinkit" and order["items"] == "Milk 1L"
+          and order["requested"] == "milk" and order["total"] == "₹199" and order["ts"], str(order))
 
     try:
         policy.authorize(hub, kind="tap", element=el("Place order"), elements=both, agent="test", seen_app=pkg)
@@ -139,14 +148,26 @@ def main():
     check("session grant skips the second card",
           again.get("approved") and not any(c == "ask" for c, _ in hub.calls), str(hub.calls))
 
-    hub.answer = "allow_once"
+    hub.calls.clear()
     try:
         policy.authorize(hub, kind="type", element=el("PIN", password=True), confirm=True,
                          elements=[], agent="test", seen_app=pkg)
-    except policy.ApprovalDenied:
-        check("confirm=true cannot skip a password", False, "denied without a card")
-    else:
-        check("a password still needs the card", any(c == "ask" and a.get("risk") == "password" for c, a in hub.calls))
+        check("a password field is refused", False)
+    except policy.ApprovalDenied as err:
+        check("a password field is refused with no card",
+              "password" in str(err).lower() and not any(c == "ask" for c, _ in hub.calls), str(err))
+
+    hub.answer = "deny"
+    hub.calls.clear()
+    try:
+        policy.authorize(hub, kind="tap", element=el("Place order"), elements=extra,
+                         agent="test", seen_app=pkg)
+        check("an extra cart item needs the card", False)
+    except policy.ApprovalDenied as err:
+        asked = hub.calls[-1]
+        check("an extra cart item needs the card and names the item",
+              "did not allow" in str(err) and asked[0] == "ask" and "Bread 400g" in asked[1].get("why", ""),
+              str(asked))
 
     stopped = lambda cmd, args=None, timeout=60: {"stopped": True, "app": pkg}
     try:

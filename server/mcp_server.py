@@ -30,17 +30,20 @@ mcp = MCPServer("phone", instructions=(
     "scroll('down'), find('Settings') scrolls until it's visible. Actions return the new screen "
     "(look=false to skip). "
     "Reading the screen, scrolling, opening apps, and typing into ordinary fields just run. "
-    "Paying, sending a message, deleting, installing an app, or a password field raises a card "
-    "on the phone: the owner slides to approve once or for this session, taps Deny, or ignores it "
-    "and the timer denies. Pass why= with a short plain reason. If they tap Stop, stop and tell them. "
+    "Paying, sending a message, deleting, or installing an app raises a card on the phone: the "
+    "owner slides to approve once or for this session, taps Deny, or ignores it and the timer "
+    "denies. Pass why= with a short plain reason. If they tap Stop, stop and tell them. "
+    "Never type a password, PIN, or one-time code. A password field is refused even if the owner "
+    "slides or you pass confirm=true. "
     "Purchases: call set_owner_request with the owner's verbatim request before you shop. "
     "If that request named the app and cash on delivery (COD / pay on delivery), finish the order "
     "end to end, including the final place-order button, with no extra card. Before that tap, "
-    "call checkout_status. The payment method on screen must be cash or pay on delivery. If a card, "
-    "UPI, or wallet (such as Amazon Pay) is selected, switch it to cash on delivery and check again. "
-    "If cash on delivery is not offered, the place-order tap shows the approval card; do not pay "
-    "with a prepaid method unless they approve that card. Any other purchase always needs the card. "
-    "Never invent a password or PIN; a password field still needs the slide on the phone."))
+    "call checkout_status. The payment method on screen must be cash or pay on delivery (an "
+    "unchecked option does not count), and the items on screen must be the ones they asked for. "
+    "If a card, UPI, or wallet (such as Amazon Pay) is selected, switch it to cash on delivery and "
+    "check again. If cash on delivery is not offered, it is unchecked, or the cart has other items, "
+    "the place-order tap shows the approval card; do not pay with a prepaid method unless they "
+    "approve that card. Any other purchase always needs the card."))
 
 _refs = {}  # number -> element from the latest look()
 _front_app = ""
