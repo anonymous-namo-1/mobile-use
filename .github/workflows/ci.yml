@@ -9,6 +9,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r server/requirements.txt
+      - run: python tests/test_policy.py
       - run: python tests/smoke_test.py
   android:
     runs-on: ubuntu-latest

@@ -1,0 +1,5 @@
+{
+  "cod_auto_complete": true,
+  "approval_timeout_sec": 60,
+  "session_minutes": 30
+}

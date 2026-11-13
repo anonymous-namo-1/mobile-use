@@ -14,6 +14,7 @@ import itertools
 import json
 import os
 import secrets
+import socket
 import subprocess
 import time
 
@@ -46,6 +47,11 @@ def tailscale_ip():
     return out[0]
 
 
+# Reading the screen twice is safe. Taps, typing, and approvals are not retried: the phone
+# may already have done them if the reply was what got lost.
+READ_ONLY_RETRY = {"ping", "status", "look", "tree", "screenshot", "apps"}
+
+
 class Hub:
     def __init__(self):
         self.key = key()
@@ -53,6 +59,10 @@ class Hub:
         self.pending = {}
         self.ids = itertools.count(1)
         self.send_lock = asyncio.Lock()
+        self.connected = asyncio.Event()
+        self.dropped_at = 0.0
+        self.had_phone = False
+        self.reconnects = 0
 
     # ---- phone side ----
     async def on_phone(self, reader, writer):
@@ -69,7 +79,20 @@ class Hub:
             return
         if self.phone:
             self.phone[1].close()
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except OSError:
+                pass
+        if self.had_phone:
+            self.reconnects += 1
+            log(f"phone reconnected ({self.reconnects})")
+        self.had_phone = True
+        self.dropped_at = 0.0
+        # Publish the phone before waking waiters, so a retry sees the new socket.
         self.phone = (reader, writer, hello)
+        self.connected.set()
         log(f"phone connected: {hello.get('model')} from {peer[0]}")
         try:
             while line := await reader.readline():
@@ -80,29 +103,66 @@ class Hub:
         except Exception as e:
             log(f"phone link error: {e}")
         finally:
-            if self.phone and self.phone[1] is writer:
+            current = self.phone and self.phone[1] is writer
+            if current:
                 self.phone = None
-            for fut in self.pending.values():
-                if not fut.done():
-                    fut.set_result({"ok": False, "error": "phone disconnected"})
-            self.pending.clear()
+                self.dropped_at = time.time()
+                self.connected.clear()
+                for fut in self.pending.values():
+                    if not fut.done():
+                        fut.set_result({"ok": False, "error": "phone disconnected"})
+                self.pending.clear()
             log("phone disconnected")
 
-    async def call(self, cmd, args=None, timeout=60):
-        if not self.phone:
-            return {"ok": False, "error": "phone not connected (Phone Agent app off, no internet, or Tailscale off on the phone)"}
-        rid = next(self.ids)
-        fut = asyncio.get_running_loop().create_future()
-        self.pending[rid] = fut
-        async with self.send_lock:
-            w = self.phone[1]
-            w.write((json.dumps({"id": rid, "cmd": cmd, "args": args or {}}) + "\n").encode())
-            await w.drain()
+    async def _wait_phone(self):
+        """True when a phone is on the socket. After a recent drop, wait briefly for it to come back."""
+        if self.phone:
+            return True
+        if not self.dropped_at or time.time() - self.dropped_at > 20:
+            return False
         try:
-            return await asyncio.wait_for(fut, timeout)
+            await asyncio.wait_for(self.connected.wait(), 8)
         except asyncio.TimeoutError:
-            self.pending.pop(rid, None)
-            return {"ok": False, "error": f"phone did not answer {cmd} within {timeout}s"}
+            return False
+        return self.phone is not None
+
+    async def call(self, cmd, args=None, timeout=60):
+        offline = {"ok": False, "error": "phone not connected (Phone Agent app off, no internet, or Tailscale off on the phone)"}
+        attempts = 2 if cmd in READ_ONLY_RETRY else 1
+        last = offline
+        for attempt in range(attempts):
+            if not await self._wait_phone():
+                return last if last.get("error") != offline["error"] or self.had_phone else offline
+            if attempt:
+                log(f"retrying {cmd} after reconnect")
+            rid = next(self.ids)
+            fut = asyncio.get_running_loop().create_future()
+            self.pending[rid] = fut
+            try:
+                async with self.send_lock:
+                    if not self.phone:
+                        raise ConnectionError("phone disconnected")
+                    w = self.phone[1]
+                    w.write((json.dumps({"id": rid, "cmd": cmd, "args": args or {}}) + "\n").encode())
+                    await w.drain()
+            except Exception:
+                self.pending.pop(rid, None)
+                if not fut.done():
+                    fut.cancel()
+                last = {"ok": False, "error": "phone disconnected"}
+                continue
+            try:
+                result = await asyncio.wait_for(fut, timeout)
+            except asyncio.TimeoutError:
+                self.pending.pop(rid, None)
+                return {"ok": False, "error": f"phone did not answer {cmd} within {timeout}s"}
+            if result.get("ok"):
+                return result
+            last = result
+            if "disconnected" not in str(result.get("error", "")) or attempt == attempts - 1:
+                return result
+            await asyncio.sleep(0.3)
+        return last
 
     async def keepalive(self):
         while True:
@@ -123,7 +183,8 @@ class Hub:
                 req = json.loads(line)
                 if req.get("cmd") == "hub_status":
                     res = {"ok": True, "result": {"connected": bool(self.phone),
-                                                  "phone": self.phone[2].get("model") if self.phone else None}}
+                                                  "phone": self.phone[2].get("model") if self.phone else None,
+                                                  "reconnects": self.reconnects}}
                 else:
                     res = await self.call(req["cmd"], req.get("args"), req.get("timeout", 60))
                 writer.write((json.dumps(res) + "\n").encode())

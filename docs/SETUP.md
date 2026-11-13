@@ -4,9 +4,10 @@ For AI agents: do these steps **in order**, tell the person what each one is for
 and check each result before moving on. `HOST` means the machine chosen in AGENTS.md step 1
 (laptop, cloud server or home machine). Commands run on HOST unless it says "on the phone".
 
-> **Status:** these steps work today. One part is still manual: the app is given the hub's
-> address and key over ADB once (step 3b). A QR-code setup that removes ADB is planned, see
-> [ROADMAP.md](ROADMAP.md). Update these steps when that lands.
+> **Status:** these steps work today. On a Linux server you can do steps 2 and 3a–3b with one
+> command instead: [`install.sh`](../install.sh), documented in the [README](../README.md).
+> One part is still manual either way: the person switches the app on in Accessibility (step 3c).
+> A QR-code setup that removes ADB is planned, see [ROADMAP.md](ROADMAP.md).
 
 ## 1. Tailscale (private network between HOST and the phone)
 
@@ -91,7 +92,8 @@ See [CONNECT_YOUR_AGENT.md](CONNECT_YOUR_AGENT.md) (Claude Code, Codex, Gemini C
 
 1. `look`: the reply lists numbered buttons; the phone shows a **blue glow**.
 2. Open the Calculator, tap 7 × 6 =, check it shows 42.
-3. `ask_owner("Test: tap Allow")`: the person taps Allow on the phone.
+3. `ask_owner("Test: slide to approve")`: a card appears at the bottom of the phone. The person
+   slides the thumb across (a tap does not count). Letting the timer run out denies it.
 4. The person taps **Stop** in the "AI agent is using your phone" notification; the next action
    must fail with "stopped by the owner". Then they tap **Resume**.
 

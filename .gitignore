@@ -5,6 +5,8 @@ hub.key
 release-password*
 # local state
 actions.log
+audit.log
+policy.local.json
 last-address
 *.lock
 .venv/

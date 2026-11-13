@@ -1,5 +1,5 @@
 # systemd unit for the Mobile Use hub (Linux laptop or server).
-# Edit User and the paths, then:
+# install.sh writes this for you. To install it by hand, edit User and the paths, then:
 #   sudo cp phone-hub.service /etc/systemd/system/ && sudo systemctl daemon-reload
 #   sudo systemctl enable --now phone-hub
 [Unit]

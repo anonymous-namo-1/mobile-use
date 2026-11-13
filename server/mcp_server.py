@@ -8,11 +8,11 @@ import base64
 import io
 import json
 import os
-import re
 import socket
 import threading
 import time
 
+import policy
 from mcp.server.mcpserver import Image, MCPServer
 from PIL import Image as PILImage, ImageDraw, ImageFont
 
@@ -24,25 +24,26 @@ SHOT_WIDTH = 540
 SETTLE = 0.6  # seconds for the screen to update before looking after an action
 ME = f"claude-{os.getpid()}"
 
-# Apps where every tap/type needs the owner's OK (payments, banking, trading)
-SENSITIVE_APPS = re.compile(
-    r"pay|bank|upi|wallet|paisa|phonepe|paytm|nbu|sbi|icici|hdfc|axis|kotak|"
-    r"zerodha|groww|upstox|binance|coin|crypto|stripe|razorpay", re.I)
-# Buttons that send, pay or delete
-RISKY_LABELS = re.compile(
-    r"^(send|pay|pay now|buy|buy now|place order|confirm|delete|remove|transfer|submit|"
-    r"proceed to pay|checkout|post|publish|unsubscribe|cancel subscription)\b", re.I)
-
 mcp = MCPServer("phone", instructions=(
     "Controls the owner's Android phone. Start with look(): screenshot with numbered boxes "
     "and a list like '[7] button \"Send\"'. Act by number: tap(ref=7), type_text('hi', ref=12), "
     "scroll('down'), find('Settings') scrolls until it's visible. Actions return the new screen "
-    "(look=false to skip). Never type passwords or PINs. Before payments, purchases, sending "
-    "messages the owner didn't ask for, or deleting: ask the owner (in chat, then confirm=true, "
-    "or ask_owner() for an Allow/Deny button on the phone). If the owner taps Stop on the "
-    "phone, stop and tell them."))
+    "(look=false to skip). "
+    "Reading the screen, scrolling, opening apps, and typing into ordinary fields just run. "
+    "Paying, sending a message, deleting, installing an app, or a password field raises a card "
+    "on the phone: the owner slides to approve once or for this session, taps Deny, or ignores it "
+    "and the timer denies. Pass why= with a short plain reason. If they tap Stop, stop and tell them. "
+    "Purchases: call set_owner_request with the owner's verbatim request before you shop. "
+    "If that request named the app and cash on delivery (COD / pay on delivery), finish the order "
+    "end to end, including the final place-order button, with no extra card. Before that tap, "
+    "call checkout_status. The payment method on screen must be cash or pay on delivery. If a card, "
+    "UPI, or wallet (such as Amazon Pay) is selected, switch it to cash on delivery and check again. "
+    "If cash on delivery is not offered, the place-order tap shows the approval card; do not pay "
+    "with a prepaid method unless they approve that card. Any other purchase always needs the card. "
+    "Never invent a password or PIN; a password field still needs the slide on the phone."))
 
 _refs = {}  # number -> element from the latest look()
+_front_app = ""
 _scale = 2.0  # device px per screenshot px
 _apps = None
 _lock = threading.Lock()
@@ -99,9 +100,10 @@ def _log(msg):
 # ---------- seeing ----------
 
 def _look(shot=True):
-    global _refs, _scale
+    global _refs, _scale, _front_app
     r = _hub("look", {"shot": shot, "width": SHOT_WIDTH})
     _scale = r["w"] / SHOT_WIDTH
+    _front_app = r.get("app") or ""
     _refs, lines = {}, []
     img = None
     if shot:
@@ -153,27 +155,25 @@ def _el(ref):
     return _refs[ref]
 
 
-def _guard(ref=0, confirm=False, what=""):
-    """Password fields are never touched; payment apps and Send/Pay/Buy/Delete buttons need
-    the owner's OK (confirm=true after asking in chat, or Allow on the phone)."""
+def _hub_call(cmd, args=None, timeout=60):
+    try:
+        return _hub(cmd, args, timeout)
+    except RuntimeError as err:
+        if "stopped" in str(err):
+            policy.get_store().clear_session()
+        raise
+
+
+def _guard(ref=0, confirm=False, what="", kind="tap", enter=False, typed=""):
+    """Harmless actions pass. Risky ones wait for the slide card. See policy.py."""
     _claim()
-    e = _refs.get(ref) if ref else None
-    if e and e.get("password"):
-        raise PermissionError("that is a password/PIN field: never type or tap into it for the owner")
-    if confirm:
-        return
-    reason = None
-    app = _hub("ping").get("app", "")
-    if SENSITIVE_APPS.search(app):
-        reason = f"use {app}, a payment/banking app"
-    elif e and RISKY_LABELS.search(e["label"]):
-        reason = f"tap '{e['label']}'"
-    if reason:
-        ans = _hub("ask", {"text": f"Allow the agent to {reason}? {what}".strip(), "timeout": 90}, timeout=100)
-        if ans.get("answer") != "allow":
-            raise PermissionError(f"the owner did not allow it on the phone ({ans.get('answer')}): "
-                                  f"ask them in chat, then repeat with confirm=true")
-        _log(f"owner allowed on phone: {reason}")
+    try:
+        return policy.authorize(
+            _hub_call, kind=kind, element=_refs.get(ref) if ref else None,
+            elements=list(_refs.values()), why=what, confirm=confirm, enter=enter,
+            agent=ME, typed=typed, seen_app=_front_app)
+    except policy.ApprovalDenied as err:
+        raise PermissionError(str(err)) from None
 
 
 # ---------- tools ----------
@@ -211,27 +211,30 @@ def screenshot() -> Image:
 
 
 @mcp.tool()
-def tap(ref: int = 0, x: int = -1, y: int = -1, confirm: bool = False, look: bool = True):
-    """Tap element [ref] from the last look(), or (x, y) in screenshot pixels."""
+def tap(ref: int = 0, x: int = -1, y: int = -1, confirm: bool = False, look: bool = True, why: str = ""):
+    """Tap element [ref] from the last look(), or (x, y) in screenshot pixels.
+    why: plain reason shown on the approval card when this tap is risky."""
     with _lock:
-        _guard(ref, confirm)
+        decision = _guard(ref, confirm, why, kind="tap")
         if ref:
             e = _el(ref)
-            _hub("click", {"i": e["i"]})
+            _hub("click", {"i": e["i"], "approved": bool(decision.get("approved"))})
             what = f"tapped [{ref}] {e['label']!r}"
         else:
             _hub("tap", {"x": round(x * _scale), "y": round(y * _scale)})
             what = f"tapped {x},{y}"
+        if decision.get("auto_cod"):
+            what += " (cash-on-delivery order placed and logged)"
         return _after(what, look)
 
 
 @mcp.tool()
-def long_press(ref: int = 0, x: int = -1, y: int = -1, confirm: bool = False, look: bool = True):
+def long_press(ref: int = 0, x: int = -1, y: int = -1, confirm: bool = False, look: bool = True, why: str = ""):
     """Long-press element [ref] or (x, y) in screenshot pixels."""
     with _lock:
-        _guard(ref, confirm)
+        decision = _guard(ref, confirm, why, kind="long_press")
         if ref:
-            _hub("long_click", {"i": _el(ref)["i"]})
+            _hub("long_click", {"i": _el(ref)["i"], "approved": bool(decision.get("approved"))})
         else:
             _hub("long_tap", {"x": round(x * _scale), "y": round(y * _scale)})
         return _after(f"long-pressed {ref or (x, y)}", look)
@@ -239,12 +242,13 @@ def long_press(ref: int = 0, x: int = -1, y: int = -1, confirm: bool = False, lo
 
 @mcp.tool()
 def type_text(text: str, ref: int = 0, clear: bool = True, enter: bool = False,
-              confirm: bool = False, look: bool = True):
+              confirm: bool = False, look: bool = True, why: str = ""):
     """Type text (any language, emoji OK) into field [ref], or the focused field if ref=0.
-    clear=false appends; enter=true presses the keyboard's Enter/Search/Send key afterwards."""
+    clear=false appends; enter=true presses the keyboard's Enter/Search/Send key afterwards
+    (that needs approval, because it can send a message)."""
     with _lock:
-        _guard(ref, confirm, f"(type: {text[:60]})")
-        args = {"text": text, "clear": clear, "enter": enter}
+        decision = _guard(ref, confirm, why, kind="type", enter=enter, typed=text)
+        args = {"text": text, "clear": clear, "enter": enter, "approved": bool(decision.get("approved"))}
         if ref:
             args["i"] = _el(ref)["i"]
         _hub("set_text", args)
@@ -343,12 +347,55 @@ def find(text: str, max_scrolls: int = 8, look: bool = True):
 
 
 @mcp.tool()
-def ask_owner(question: str, timeout: int = 90) -> str:
-    """Show the owner an Allow / Deny notification on the phone and wait for the answer.
-    Returns allow, deny or timeout."""
-    r = _hub("ask", {"text": question, "timeout": timeout}, timeout=timeout + 10)
-    _log(f"asked owner: {question!r} -> {r.get('answer')}")
-    return r.get("answer", "timeout")
+def ask_owner(question: str, timeout: int = 60) -> str:
+    """Show the approval card on the phone and wait. Returns allow_once, allow_session, deny, or timeout."""
+    r = _hub("ask", {"title": "Question", "text": question, "why": "The agent is asking you to decide.",
+                     "risk": "question", "timeout": timeout}, timeout=timeout + 15)
+    answer = r.get("answer", "timeout")
+    policy.get_store().audit("approval", agent=ME, decision=answer, risk="question", action=question[:160])
+    _log(f"asked owner: {question!r} -> {answer}")
+    return answer
+
+
+@mcp.tool()
+def set_owner_request(text: str) -> str:
+    """Record the owner's verbatim request. Arms cash-on-delivery auto-complete only when the
+    text names an installed shopping app and cash on delivery (COD / pay on delivery)."""
+    apps = _hub("apps").get("apps", [])
+    rec = policy.get_store().save_request(text, apps)
+    return policy.explain_request(rec)
+
+
+@mcp.tool()
+def checkout_status() -> str:
+    """Read the checkout screen: which payment method is selected, the total, and whether
+    the final place-order tap will auto-complete, ask to switch to cash on delivery, or raise the card."""
+    with _lock:
+        _claim()
+        _look(shot=False)
+        return policy.explain_checkout(_front_app, list(_refs.values()))
+
+
+@mcp.tool()
+def approval_log(limit: int = 20) -> str:
+    """Recent approval decisions and cash-on-delivery orders (app, items, total, time)."""
+    return policy.format_audit(policy.get_store().read_audit(limit))
+
+
+@mcp.tool()
+def set_policy(cod_auto_complete: bool) -> str:
+    """Turn the cash-on-delivery auto-complete rule on or off. It is on by default."""
+    cfg = policy.set_cod_auto_complete(cod_auto_complete)
+    state = "on" if cfg["cod_auto_complete"] else "off"
+    policy.get_store().audit("policy", agent=ME, decision=state, action="cod_auto_complete")
+    return f"cod_auto_complete is {state}"
+
+
+@mcp.tool()
+def revoke_approvals() -> str:
+    """Clear 'approve for this session' grants. The next risky action asks on the phone again."""
+    policy.get_store().clear_session()
+    return "session approvals cleared"
 
 
 @mcp.tool()
