@@ -56,8 +56,16 @@ only run `phone …` (see `server/restricted-ssh.md`), never a full shell.
 | `scroll`, `swipe`, `press_key` | back, home, recent, notifications, quick_settings. |
 | `open_app(name)`, `list_apps` | Open apps by name. |
 | `wait_for(text)`, `find(text)` | Wait until something appears; scroll until it's visible. |
-| `ask_owner(question)` | Allow / Deny notification on the phone. |
+| `ask_owner(question)` | Approval card on the phone (slide to approve once or for this session, deny, or timeout). |
+| `set_owner_request(text)` | The owner's verbatim request. Arms cash-on-delivery auto-complete when it names the app and COD. |
+| `checkout_status()` | Which payment method checkout shows, and what a place-order tap will do. |
+| `approval_log()`, `set_policy(on)`, `revoke_approvals()` | Audit log, the COD rule, session grants. |
 | `status`, `wake` | Connection and lock state; turn the screen on. |
 
-Safety built in: password fields are refused; payment/banking apps and Send/Pay/Buy/Delete
-buttons need `confirm=true` (after asking the person in chat) or **Allow** on the phone.
+Safety built in: reading, scrolling, and opening apps just run. Paying, sending, deleting, and
+installing show the approval card (slide; a tap does not approve). Password and PIN fields are
+refused outright. `confirm=true` records that the person already agreed in chat; it does not
+unlock a password field, and it does not skip the card when cash on delivery could not be
+verified. Cash-on-delivery orders the person asked for, in an app they named, can complete
+without the card only when checkout shows that payment method and the items on screen are the
+ones they named. See the README.

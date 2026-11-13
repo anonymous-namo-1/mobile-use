@@ -6,8 +6,9 @@ without Android tools or ADB.
 - [x] **Prebuilt app** in `dist/` with a SHA-256 checksum (users can still build their own). Next: also attach it to GitHub Releases.
 - [ ] **QR setup:** the hub prints a QR code (address + key); the app gets a setup screen that
       scans it. Removes ADB from setup entirely.
-- [ ] **One-command installer** for the hub on Linux / Mac / WSL: creates the venv, the key, the
-      service (systemd or launchd), and shows the QR code.
+- [x] **One-command installer** for the hub on Linux: `install.sh` creates the checkout, the venv,
+      the key, and the systemd service, and installs the APK when one phone is connected over adb.
+      macOS still follows `docs/SETUP.md`. QR setup is still separate.
 - [ ] **`mobile-use add <claude|codex|gemini|cursor>`** to register the MCP server automatically.
 - [x] **Neutral package name** (`dev.mobileuse.agent`) and settings via environment variables.
 - [ ] **Same-Wi-Fi mode** without Tailscale for people who only use it at home.

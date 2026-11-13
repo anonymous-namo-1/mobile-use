@@ -13,26 +13,38 @@
   phone apps                   list apps
   phone find "text"            scroll until text is visible
   phone wait "text" [seconds]  wait until text appears
-  phone ask "question"         Allow/Deny notification to the owner; prints allow, deny or timeout
-Rules: password fields are refused; payment apps and Send/Pay/Buy/Delete buttons need the owner's
-Allow on the phone (asked automatically); if the owner taps Stop on the phone, stop.
+  phone ask "question"         slide-to-approve card; prints allow_once, allow_session, deny, or timeout
+  phone task "verbatim request"  arm cash-on-delivery auto-complete when the request names the app and COD
+  phone checkout               what payment method the screen shows
+  phone log                    recent approvals and COD orders
+  phone policy [on|off]        cash-on-delivery auto-complete (on by default)
+  phone revoke                 clear "approve for this session"
+
+Reading, scrolling, and opening apps just run. Paying, sending, deleting, and installing
+show a card on the phone: slide to approve, or it denies itself when the timer ends.
+Password and PIN fields are refused. If the owner's request named the app and cash on delivery,
+the final place-order tap completes the order only when that method is selected and the cart
+matches the request. Otherwise the approval card is shown. If they tap Stop, stop.
 """
-import json, os, re, socket, sys, time
+import json, os, socket, sys, time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import policy
 
 HUB = os.environ.get("PHONE_HUB_SOCK", "/tmp/phone-hub.sock")
 LOCK = os.environ.get("PHONE_LOCK_FILE", "/tmp/phone-agent.lock")
 ME = os.environ.get("PHONE_AGENT_NAME", "cli-agent")  # shown in "phone busy" messages
 LAST = f"/tmp/phonectl-last-look-{os.getuid()}.json"
-SENSITIVE_APPS = re.compile(r"pay|bank|upi|wallet|paisa|phonepe|paytm|nbu|sbi|icici|hdfc|axis|kotak|"
-                            r"zerodha|groww|upstox|binance|coin|crypto|stripe|razorpay", re.I)
-RISKY = re.compile(r"^(send|pay|pay now|buy|buy now|place order|confirm|delete|remove|transfer|submit|"
-                   r"proceed to pay|checkout|post|publish|unsubscribe|cancel subscription)\b", re.I)
 
 
 def hub(cmd, args=None, timeout=60):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout + 5)
-    s.connect(HUB)
+    try:
+        s.connect(HUB)
+    except (ConnectionRefusedError, FileNotFoundError):
+        sys.exit("error: the phone hub isn't running")
     s.sendall((json.dumps({"cmd": cmd, "args": args or {}, "timeout": timeout}) + "\n").encode())
     buf = b""
     while not buf.endswith(b"\n"):
@@ -42,7 +54,10 @@ def hub(cmd, args=None, timeout=60):
         buf += c
     r = json.loads(buf or b'{"ok":false,"error":"no answer from hub"}')
     if not r.get("ok"):
-        sys.exit("error: " + r.get("error", "phone error"))
+        err = r.get("error", "phone error")
+        if "stopped" in err:
+            policy.get_store().clear_session()
+        sys.exit("error: " + err)
     return r.get("result", {})
 
 
@@ -63,26 +78,36 @@ def claim():
         pass
 
 
-def element(n):
+def load_look():
     try:
-        els = json.load(open(LAST))
+        data = json.load(open(LAST))
     except OSError:
         sys.exit("run `phone look` first")
+    if isinstance(data, list):  # older look files were a bare list
+        return "", data
+    return data.get("app", ""), data.get("els", [])
+
+
+def element(n):
+    _app, els = load_look()
     if not 1 <= n <= len(els):
         sys.exit(f"no element {n} in the last look; run `phone look` again")
     return els[n - 1]
 
 
-def guard(e=None, what=""):
-    if e and e.get("password"):
-        sys.exit("refused: password/PIN field. Never type passwords or PINs for the owner.")
-    app = hub("ping").get("app", "")
-    reason = f"use {app}, a payment/banking app" if SENSITIVE_APPS.search(app) else \
-        f"tap '{e['label']}'" if e and RISKY.search(e.get("label", "")) else None
-    if reason:
-        ans = hub("ask", {"text": f"Allow {ME} to {reason}? {what}".strip(), "timeout": 90}, timeout=100).get("answer")
-        if ans != "allow":
-            sys.exit(f"refused: the owner did not allow it on the phone ({ans})")
+def guard(e=None, what="", kind="tap", enter=False, text=""):
+    seen_app, elements = ("", [])
+    try:
+        seen_app, elements = load_look()
+    except SystemExit:
+        if e is not None:
+            raise
+    try:
+        return policy.authorize(
+            hub, kind=kind, element=e, elements=elements, why=what, enter=enter,
+            agent=ME, typed=text, seen_app=seen_app)
+    except policy.ApprovalDenied as err:
+        sys.exit(str(err))
 
 
 def look():
@@ -91,7 +116,7 @@ def look():
     els = [e for e in r["els"] if not (e["kind"] == "button" and len(e["label"]) >= 60 and
            (e["b"][2] - e["b"][0]) * (e["b"][3] - e["b"][1]) > 0.3 * area)]
     with open(LAST, "w") as f:
-        json.dump(els, f)
+        json.dump({"app": r.get("app") or "", "els": els}, f)
     print(f"app: {r['app']}" + (" | keyboard open" if r.get("keyboard") else "")
           + (" | PHONE LOCKED (ask the owner to unlock; never type the PIN)" if r.get("locked") else ""))
     for n, e in enumerate(els, 1):
@@ -114,14 +139,19 @@ def main(a):
         import base64
         sys.stdout.buffer.write(base64.b64decode(hub("screenshot", {"width": 540})["jpeg"]))
     elif c == "click":
-        claim(); e = element(int(a[1])); guard(e)
-        hub("click", {"i": e["i"]}); print(f"tapped {e['label']!r}")
+        claim(); e = element(int(a[1])); decision = guard(e, kind="tap")
+        hub("click", {"i": e["i"], "approved": bool(decision.get("approved"))})
+        note = " (cash-on-delivery order placed and logged)" if decision.get("auto_cod") else ""
+        print(f"tapped {e['label']!r}{note}")
     elif c == "tap":
-        claim(); guard()
+        claim(); guard(kind="tap")
         hub("tap", {"x": int(a[1]), "y": int(a[2])}); print("tapped")
     elif c == "type":
-        claim(); e = element(int(a[1])); guard(e, f"(type: {a[2][:60]})")
-        hub("set_text", {"i": e["i"], "text": a[2], "enter": len(a) > 3 and a[3] == "enter"}); print("typed")
+        claim(); e = element(int(a[1])); enter = len(a) > 3 and a[3] == "enter"
+        decision = guard(e, kind="type", enter=enter, text=a[2])
+        hub("set_text", {"i": e["i"], "text": a[2], "enter": enter,
+                         "approved": bool(decision.get("approved"))})
+        print("typed")
     elif c == "key":
         claim(); hub("global", {"key": a[1]}); print("pressed", a[1])
     elif c == "scroll":
@@ -149,7 +179,33 @@ def main(a):
         t = int(a[2]) if len(a) > 2 else 15
         print(json.dumps(hub("wait_for", {"text": a[1], "timeout": t}, timeout=t + 10)))
     elif c == "ask":
-        print(hub("ask", {"text": a[1], "timeout": 90}, timeout=100).get("answer"))
+        print(hub("ask", {"title": "Question", "text": a[1], "why": "The agent is asking you to decide.",
+                          "risk": "question", "timeout": 60}, timeout=80).get("answer"))
+    elif c == "task":
+        rec = policy.get_store().save_request(a[1], hub("apps").get("apps", []))
+        print(policy.explain_request(rec))
+    elif c == "checkout":
+        r = hub("look", {"shot": False})
+        area = r["w"] * r["h"]
+        els = [e for e in r["els"] if not (e["kind"] == "button" and len(e["label"]) >= 60 and
+               (e["b"][2] - e["b"][0]) * (e["b"][3] - e["b"][1]) > 0.3 * area)]
+        with open(LAST, "w") as f:
+            json.dump({"app": r.get("app") or "", "els": els}, f)
+        print(policy.explain_checkout(r.get("app") or "", els))
+    elif c == "log":
+        limit = int(a[1]) if len(a) > 1 else 20
+        print(policy.format_audit(policy.get_store().read_audit(limit)))
+    elif c == "policy":
+        if len(a) > 1:
+            cfg = policy.set_cod_auto_complete(a[1].lower() in ("on", "1", "true", "yes"))
+            policy.get_store().audit("policy", agent=ME, decision="on" if cfg["cod_auto_complete"] else "off",
+                                     action="cod_auto_complete")
+        else:
+            cfg = policy.load_policy()
+        print("cod_auto_complete", "on" if cfg["cod_auto_complete"] else "off")
+    elif c == "revoke":
+        policy.get_store().clear_session()
+        print("session approvals cleared")
     else:
         sys.exit(f"unknown command {c!r}; run `phone help`")
 
@@ -159,5 +215,3 @@ if __name__ == "__main__":
         main(sys.argv[1:])
     except (IndexError, ValueError):
         sys.exit("wrong arguments; run `phone help`")
-    except (ConnectionRefusedError, FileNotFoundError):
-        sys.exit("error: the phone hub isn't running")

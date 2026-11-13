@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="service_desc">Lets your own AI agent (on your private server, over Tailscale) see and control this phone. A blue glowing border and a notification with a Stop button show whenever it is active.</string>
+    <string name="service_desc">Lets your own AI agent (on your private server, over Tailscale) see and control this phone. A blue glowing border and a notification with a Stop button show whenever it is active. Paying, sending, deleting, or installing asks you to slide to approve on a card; doing nothing denies it.</string>
 </resources>

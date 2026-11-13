@@ -65,6 +65,7 @@ class Link extends Thread {
                 sock = s;
                 s.connect(new InetSocketAddress(host, port), 10000);
                 s.setTcpNoDelay(true);
+                s.setKeepAlive(true);
                 s.setSoTimeout(90000); // the server pings every 25 s
                 OutputStream out = s.getOutputStream();
                 BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));

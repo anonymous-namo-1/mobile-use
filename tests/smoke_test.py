@@ -21,7 +21,11 @@ TMP = tempfile.mkdtemp(prefix="mobileuse-test-")
 PORT = 18765
 ENV = dict(os.environ, PHONE_HUB_HOST="127.0.0.1", PHONE_HUB_PORT=str(PORT),
            PHONE_HUB_SOCK=os.path.join(TMP, "hub.sock"), PHONE_LOCK_FILE=os.path.join(TMP, "lock"),
-           PHONE_AGENT_NAME="test-agent", PHONE_HUB_KEY=os.path.join(TMP, "hub.key"))
+           PHONE_AGENT_NAME="test-agent", PHONE_HUB_KEY=os.path.join(TMP, "hub.key"),
+           PHONE_SESSION_FILE=os.path.join(TMP, "session.json"),
+           PHONE_OWNER_REQUEST=os.path.join(TMP, "request.json"),
+           PHONE_AUDIT_LOG=os.path.join(TMP, "audit.log"),
+           PHONE_POLICY_LOCAL=os.path.join(TMP, "policy.local.json"))
 os.environ.update(ENV)
 
 
@@ -39,6 +43,7 @@ SCREEN = {"app": "com.example.calculator", "keyboard": False, "locked": False, "
               {"i": 2, "kind": "field", "label": "Message", "b": [0, 2000, 800, 2200]},
               {"i": 3, "kind": "field", "label": "", "b": [0, 400, 1080, 500], "password": True}]}
 calls = []
+ask_answers = []
 
 
 def fake_phone(key):
@@ -58,9 +63,11 @@ def fake_phone(key):
             if cmd == "look" and args.get("shot", True):
                 res["jpeg"] = tiny_jpeg()
         elif cmd == "ask":
-            res = {"answer": "deny"}  # the owner says no
+            res = {"answer": ask_answers.pop(0) if ask_answers else "deny"}
         elif cmd == "apps":
-            res = {"apps": [{"name": "Calculator", "package": "com.example.calculator"}]}
+            res = {"apps": [
+                {"name": "Calculator", "package": "com.example.calculator"},
+                {"name": "Blinkit", "package": "com.blinkit.android"}]}
         else:
             res = {"done": cmd}
         f.write((json.dumps({"id": req["id"], "ok": True, "result": res}) + "\n").encode())
@@ -99,21 +106,91 @@ def main():
         check("phone status", rc == 0 and "FakePhone" in out, out)
         rc, out = phone("look")
         check("phone look lists numbered elements", rc == 0 and "[1] button '7'" in out, out)
+        def asks():
+            return [args for cmd, args in calls if cmd == "ask"]
+
+        before = len(asks())
         rc, out = phone("click", "1")
-        check("phone click", rc == 0 and ("click", {"i": 0}) in calls, out)
+        check("phone click", rc == 0 and any(cmd == "click" and args.get("i") == 0 for cmd, args in calls), out)
+        check("harmless tap does not ask", len(asks()) == before, out)
         rc, out = phone("click", "2")
-        check("Send button needs the owner's Allow (denied here)", rc != 0 and "did not allow" in out, out)
+        check("Send needs a slide-to-approve (denied here)", rc != 0 and "did not allow" in out, out)
+        check("Send is a message risk", asks()[-1].get("risk") == "message", str(asks()[-1:]))
+        asked = len(asks())
         rc, out = phone("type", "4", "secret")
-        check("password field refused", rc != 0 and "password" in out.lower(), out)
+        check("password field is refused with no card",
+              rc != 0 and "password" in out.lower() and len(asks()) == asked, out)
         rc, out = phone("open", "calculator")
         check("open app by name", rc == 0 and ("open_app", {"package": "com.example.calculator"}) in calls, out)
+
+        ask_answers.append("allow_session")
+        rc, out = phone("click", "2")
+        check("owner can approve a message for the session", rc == 0, out)
+        sent = len(asks())
+        rc, out = phone("click", "2")
+        check("session approval skips the next card", rc == 0 and len(asks()) == sent, out)
+        rc, out = phone("revoke")
+        check("revoke clears the session", rc == 0, out)
+
+        SCREEN["app"] = "com.blinkit.android"
+        SCREEN["els"] = [
+            {"i": 0, "kind": "text", "label": "Milk 1L", "b": [0, 300, 800, 420]},
+            {"i": 1, "kind": "text", "label": "Cash on Delivery", "checked": True, "b": [0, 700, 900, 820]},
+            {"i": 2, "kind": "text", "label": "To pay ₹199", "b": [0, 1100, 900, 1220]},
+            {"i": 3, "kind": "button", "label": "Place order", "b": [40, 2000, 1000, 2200]},
+        ]
+        rc, out = phone("task", "order milk on Blinkit, cash on delivery")
+        check("COD request arms Blinkit", rc == 0 and "armed" in out and "Blinkit" in out, out)
+        rc, out = phone("look")
+        check("checkout lists Place order", rc == 0 and "Place order" in out, out)
+        asked = len(asks())
+        rc, out = phone("click", "4")
+        check("COD place-order needs no card", rc == 0 and "cash-on-delivery" in out and len(asks()) == asked, out)
+        audit = open(ENV["PHONE_AUDIT_LOG"], encoding="utf-8").read()
+        check("COD order is in the audit log",
+              '"event": "cod_order"' in audit and "Blinkit" in audit and "milk" in audit and "199" in audit, audit)
+
+        SCREEN["els"][1] = {"i": 1, "kind": "button", "label": "Cash on Delivery", "checked": False, "b": [0, 700, 900, 820]}
+        SCREEN["els"].insert(1, {"i": 4, "kind": "button", "label": "UPI", "checked": True, "b": [0, 560, 900, 680]})
+        phone("look")
+        rc, out = phone("click", "5")
+        check("prepaid checkout must be switched to COD", rc != 0 and "not cash on delivery" in out, out)
+
+        SCREEN["els"] = [
+            {"i": 0, "kind": "button", "label": "UPI", "checked": True, "b": [0, 700, 900, 820]},
+            {"i": 1, "kind": "button", "label": "Place order", "b": [40, 2000, 1000, 2200]},
+        ]
+        phone("look")
+        asked = len(asks())
+        rc, out = phone("click", "2")
+        check("no COD on screen falls back to the card", rc != 0 and "did not allow" in out and len(asks()) == asked + 1, out)
+
+        SCREEN["els"] = [
+            {"i": 0, "kind": "text", "label": "Cash on Delivery", "checked": True, "b": [0, 700, 900, 820]},
+            {"i": 1, "kind": "button", "label": "Place order", "b": [40, 2000, 1000, 2200]},
+        ]
+        phone("policy", "off")
+        phone("look")
+        asked = len(asks())
+        rc, out = phone("click", "2")
+        check("policy off puts the order back on the card", rc != 0 and len(asks()) == asked + 1, out)
+        phone("policy", "on")
+
+        # a second phone connection takes over; a read is retried across the drop
+        import threading as _th
+        _th.Thread(target=fake_phone, args=(key,), daemon=True).start()
+        time.sleep(0.4)
+        rc, out = phone("status")
+        check("a reconnecting phone is usable again", rc == 0 and "FakePhone" in out, out)
 
         sys.path.insert(0, SERVER)
         import mcp_server
 
         async def mcp_checks():
             names = [t.name for t in await mcp_server.mcp.list_tools()]
-            check("MCP server lists tools", {"look", "tap", "type_text", "ask_owner"} <= set(names), names)
+            check("MCP server lists tools",
+                  {"look", "tap", "type_text", "ask_owner", "set_owner_request",
+                   "checkout_status", "approval_log", "set_policy"} <= set(names), names)
             r = await mcp_server.mcp.call_tool("look", {})
             kinds = [c.type for c in r.content]
             check("MCP look returns text + image", "text" in kinds and "image" in kinds, kinds)
