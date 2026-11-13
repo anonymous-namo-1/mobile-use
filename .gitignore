@@ -1,0 +1,12 @@
+# secrets: never commit
+hub.key
+*.keystore
+*.jks
+release-password*
+# local state
+actions.log
+last-address
+*.lock
+.venv/
+__pycache__/
+app/build/

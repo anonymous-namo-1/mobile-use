@@ -1,0 +1,18 @@
+# systemd unit for the Mobile Use hub (Linux laptop or server).
+# Edit User and the paths, then:
+#   sudo cp phone-hub.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now phone-hub
+[Unit]
+Description=Mobile Use hub (the phone connects here over Tailscale)
+After=network-online.target tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/mobile-use/server
+ExecStart=/home/YOUR_USER/mobile-use/server/.venv/bin/python /home/YOUR_USER/mobile-use/server/hub.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

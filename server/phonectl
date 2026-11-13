@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""phone: drive the owner's phone through the Mobile Use hub (for any agent that can run commands).
+
+  phone status                 connected? app in front, locked, stopped
+  phone look                   numbered list of buttons/fields/text (coordinates in screen pixels)
+  phone screenshot > s.jpg     JPEG, 540 px wide (multiply by screen_width/540 for screen pixels)
+  phone click N                tap element N from the last `phone look`
+  phone tap X Y                tap screen pixels
+  phone type N "text" [enter]  type into field N (any language); add enter to submit
+  phone key back|home|recent|notifications
+  phone scroll down|up|left|right
+  phone open "WhatsApp"        open an app by name
+  phone apps                   list apps
+  phone find "text"            scroll until text is visible
+  phone wait "text" [seconds]  wait until text appears
+  phone ask "question"         Allow/Deny notification to the owner; prints allow, deny or timeout
+Rules: password fields are refused; payment apps and Send/Pay/Buy/Delete buttons need the owner's
+Allow on the phone (asked automatically); if the owner taps Stop on the phone, stop.
+"""
+import json, os, re, socket, sys, time
+
+HUB = os.environ.get("PHONE_HUB_SOCK", "/tmp/phone-hub.sock")
+LOCK = os.environ.get("PHONE_LOCK_FILE", "/tmp/phone-agent.lock")
+ME = os.environ.get("PHONE_AGENT_NAME", "cli-agent")  # shown in "phone busy" messages
+LAST = f"/tmp/phonectl-last-look-{os.getuid()}.json"
+SENSITIVE_APPS = re.compile(r"pay|bank|upi|wallet|paisa|phonepe|paytm|nbu|sbi|icici|hdfc|axis|kotak|"
+                            r"zerodha|groww|upstox|binance|coin|crypto|stripe|razorpay", re.I)
+RISKY = re.compile(r"^(send|pay|pay now|buy|buy now|place order|confirm|delete|remove|transfer|submit|"
+                   r"proceed to pay|checkout|post|publish|unsubscribe|cancel subscription)\b", re.I)
+
+
+def hub(cmd, args=None, timeout=60):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout + 5)
+    s.connect(HUB)
+    s.sendall((json.dumps({"cmd": cmd, "args": args or {}, "timeout": timeout}) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        c = s.recv(1 << 20)
+        if not c:
+            break
+        buf += c
+    r = json.loads(buf or b'{"ok":false,"error":"no answer from hub"}')
+    if not r.get("ok"):
+        sys.exit("error: " + r.get("error", "phone error"))
+    return r.get("result", {})
+
+
+def claim():
+    try:
+        l = json.load(open(LOCK))
+        pid = l["owner"].removeprefix("claude-")
+        alive = not pid.isdigit() or os.path.exists(f"/proc/{pid}")
+        if l["owner"] != ME and alive and time.time() - l["ts"] < 120:
+            sys.exit(f"phone busy: {l['owner']} is using it ({int(time.time() - l['ts'])} s ago). Try again in 2 minutes.")
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        with open(LOCK, "w") as f:
+            json.dump({"owner": ME, "ts": time.time()}, f)
+        os.chmod(LOCK, 0o666)
+    except OSError:
+        pass
+
+
+def element(n):
+    try:
+        els = json.load(open(LAST))
+    except OSError:
+        sys.exit("run `phone look` first")
+    if not 1 <= n <= len(els):
+        sys.exit(f"no element {n} in the last look; run `phone look` again")
+    return els[n - 1]
+
+
+def guard(e=None, what=""):
+    if e and e.get("password"):
+        sys.exit("refused: password/PIN field. Never type passwords or PINs for the owner.")
+    app = hub("ping").get("app", "")
+    reason = f"use {app}, a payment/banking app" if SENSITIVE_APPS.search(app) else \
+        f"tap '{e['label']}'" if e and RISKY.search(e.get("label", "")) else None
+    if reason:
+        ans = hub("ask", {"text": f"Allow {ME} to {reason}? {what}".strip(), "timeout": 90}, timeout=100).get("answer")
+        if ans != "allow":
+            sys.exit(f"refused: the owner did not allow it on the phone ({ans})")
+
+
+def look():
+    r = hub("look", {"shot": False})
+    area = r["w"] * r["h"]
+    els = [e for e in r["els"] if not (e["kind"] == "button" and len(e["label"]) >= 60 and
+           (e["b"][2] - e["b"][0]) * (e["b"][3] - e["b"][1]) > 0.3 * area)]
+    with open(LAST, "w") as f:
+        json.dump(els, f)
+    print(f"app: {r['app']}" + (" | keyboard open" if r.get("keyboard") else "")
+          + (" | PHONE LOCKED (ask the owner to unlock; never type the PIN)" if r.get("locked") else ""))
+    for n, e in enumerate(els, 1):
+        x1, y1, x2, y2 = e["b"]
+        name = repr(e["label"]) if e["label"] else f"id={e.get('id', '?')}"
+        extra = " (password)" if e.get("password") else ""
+        print(f"[{n}] {e['kind']} {name} at {(x1 + x2) // 2},{(y1 + y2) // 2}{extra}")
+
+
+def main(a):
+    if not a or a[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    c = a[0]
+    if c == "status":
+        print(json.dumps(hub("ping")))
+    elif c == "look":
+        look()
+    elif c == "screenshot":
+        import base64
+        sys.stdout.buffer.write(base64.b64decode(hub("screenshot", {"width": 540})["jpeg"]))
+    elif c == "click":
+        claim(); e = element(int(a[1])); guard(e)
+        hub("click", {"i": e["i"]}); print(f"tapped {e['label']!r}")
+    elif c == "tap":
+        claim(); guard()
+        hub("tap", {"x": int(a[1]), "y": int(a[2])}); print("tapped")
+    elif c == "type":
+        claim(); e = element(int(a[1])); guard(e, f"(type: {a[2][:60]})")
+        hub("set_text", {"i": e["i"], "text": a[2], "enter": len(a) > 3 and a[3] == "enter"}); print("typed")
+    elif c == "key":
+        claim(); hub("global", {"key": a[1]}); print("pressed", a[1])
+    elif c == "scroll":
+        claim()
+        t = hub("tree")
+        w, h = t["w"], t["h"]
+        m = {"down": (w // 2, int(h * .72), w // 2, int(h * .32)), "up": (w // 2, int(h * .32), w // 2, int(h * .72)),
+             "left": (int(w * .85), h // 2, int(w * .15), h // 2), "right": (int(w * .15), h // 2, int(w * .85), h // 2)}
+        x1, y1, x2, y2 = m[a[1]]
+        hub("swipe", {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "ms": 280}); print("scrolled", a[1])
+    elif c == "open":
+        claim()
+        apps = hub("apps")["apps"]; k = a[1].lower()
+        hits = [x for x in apps if x["name"].lower() == k or x["package"] == a[1]] or [x for x in apps if k in x["name"].lower()]
+        if not hits:
+            sys.exit(f"no app called {a[1]!r}; see `phone apps`")
+        app = sorted(hits, key=lambda x: len(x["name"]))[0]
+        hub("open_app", {"package": app["package"]}, timeout=20); print("opened", app["name"])
+    elif c == "apps":
+        for x in sorted(hub("apps")["apps"], key=lambda x: x["name"].lower()):
+            print(f"{x['name']}: {x['package']}")
+    elif c == "find":
+        claim(); print(json.dumps(hub("find", {"text": a[1]}, timeout=60)))
+    elif c == "wait":
+        t = int(a[2]) if len(a) > 2 else 15
+        print(json.dumps(hub("wait_for", {"text": a[1], "timeout": t}, timeout=t + 10)))
+    elif c == "ask":
+        print(hub("ask", {"text": a[1], "timeout": 90}, timeout=100).get("answer"))
+    else:
+        sys.exit(f"unknown command {c!r}; run `phone help`")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (IndexError, ValueError):
+        sys.exit("wrong arguments; run `phone help`")
+    except (ConnectionRefusedError, FileNotFoundError):
+        sys.exit("error: the phone hub isn't running")
